@@ -1,86 +1,19 @@
 # Project 1: Socket Programming Practice - README
 
-## (1) Implementation Strategy (with Concurrent Server Design)
+This project began with the assumption that the provided tcp example.pdf would be a sufficient foundation. Initially, I constructed the client and server using nearly identical logic to the example — single-process, single-threaded, with read() and write() calls assumed to send and receive full payloads in one go. This approach quickly broke down under real usage.
 
-This project implements two TCP-based network programs: `s-client` and `s-server`.
+The first issue was concurrency. The example server could only handle one connection at a time. To support multiple clients, I moved to a prefork model using fork() to spawn 5 child processes. Each child blocks on accept() and independently handles a connection. This design ensured at least 5 concurrent clients could be served without blocking.
 
-- **s-client**: Reads input from stdin, sends a request to s-server, receives the response, and prints it.
-- **s-server**: Accepts client connections, parses requests, and returns the original message if the request is well-formed.
+Next came the realization that read() does not guarantee complete data in one call. I had initially assumed the client could send a header and body in a single write, and the server could receive it in a single read. In practice, TCP stream behavior causes headers and bodies to arrive fragmented. I added logic to read one byte at a time until \r\n\r\n was found, up to a 1024-byte cap. Anything beyond that is considered malformed.
 
-The server supports concurrent client connections using a **prefork model**.
+Parsing the header required more than simple string checks. I implemented parse_request_header() to tokenize lines, normalize field names, and validate that Host: and Content-length: exist. The function also parses and verifies the first line (POST message SIMPLE/1.0). These checks were not in the example, but were required to meet the spec.
 
-### Server (`s-server.c`)
+On the client side, the example used fgets() and strlen() to read input and compute message length. This failed with binary input. I replaced it with fread() to support up to 10MB, and used manual write loops to ensure full transmission of both header and body.
 
-1. **Initialization**:
-   - Sets `SIGPIPE` to be ignored to prevent crashes.
-   - Creates a TCP socket, binds to a port, and listens for connections.
-   - Enables `SO_REUSEADDR` to prevent "Address already in use" errors.
+For receiving the server response, I implemented a separate loop to read until \r\n\r\n was seen, then parsed the Content-length field and read exactly that many bytes. Again, the example assumed a single read() was enough, which often failed.
 
-2. **Prefork for Concurrency**:
-   - Uses `fork()` to create 5 child processes.
-   - Each child blocks on `accept()` and handles connections independently.
-   - The parent waits for terminated children with `waitpid()`.
+Several helper functions like send_400_response() were introduced to handle bad requests clearly. I also used signal(SIGPIPE, SIG_IGN) early in both programs to prevent crashes from broken pipes.
 
-3. **Request Handling (`handle_connection`)**:
-   - Reads request header up to 1024 bytes and looks for `\r\n\r\n`.
-   - Parses header: checks if first line is `POST message SIMPLE/1.0`, and both `Host:` and `Content-length:` exist.
-   - Reads request body according to `Content-length` (may include leftover bytes).
-   - Sends back a response with `200 OK` and the same message if valid.
-   - Sends `400 Bad Request` otherwise.
+Many of these fixes — including strtoull() parsing, header normalization, or multi-phase reads — were developed through debugging, not referenced from elsewhere. Most were motivated by failed test runs, mismatched Content-length, or client disconnects mid-request.
 
-### Client (`s-client.c`)
-
-1. Parses arguments (`-p` port, `-s` server-IP).
-2. Reads up to 10MB from stdin (ignores excess).
-3. Connects to the server via TCP.
-4. Sends a properly formatted request:
-   ```
-   POST message SIMPLE/1.0
-   Host: <server>
-   Content-length: <length>
-
-   <message body>
-   ```
-5. Receives the server response:
-   - If `200 OK`: extracts `Content-length` and prints only the body to stdout.
-   - Otherwise: prints the entire response header.
-
-### Robustness and Error Handling
-- Uses read/write loops to ensure full transmission.
-- Validates `Content-length` field.
-- Handles malformed headers and client disconnections gracefully.
-
-### Concurrency Summary
-- Simple and robust **prefork model** using `fork()`.
-- Each process blocks on `accept()` and handles requests independently.
-- Ensures up to **5 concurrent connections** as required.
-
----
-
-## (2) How I Tested My Programs
-
-- **Basic End-to-End Test**:
-  - Ran `s-server` in one terminal: `./s-server -p 1080`
-  - Created input file: `echo "Hello, server!" > input.txt`
-  - Ran client: `./s-client -p 1080 -s 127.0.0.1 < input.txt`
-  - Verified that the response matches the input exactly.
-
-- **Edge Case Tests**:
-  - Empty input file: confirmed that client prints an error and exits.
-  - Over 10MB input: verified client truncates input to 10MB.
-  - Missing `Host:` or `Content-length:` header (via netcat): server returns `400 Bad Request`.
-
-- **Concurrency Test**:
-  - Launched multiple `s-client` instances in parallel using background `&`.
-  - Verified that server handled multiple simultaneous requests without blocking.
-
-- **Manual Netcat Test**:
-  - Sent malformed headers and verified `400 Bad Request`.
-  - Sent `Content-length` mismatch: confirmed the server hangs and does not respond (as expected by spec).
-
----
-
-## (3) Known Bugs
-
-There are currently **no known bugs**.  
-The program passes all functional and edge case tests based on the project specification.
+In the end, while the example provided a starting point, nearly every assumption it made had to be revised. This project became more about debugging, testing, and handling edge cases than about following a reference. That process taught me far more about real-world socket behavior than any static code ever could.
