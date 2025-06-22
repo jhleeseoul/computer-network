@@ -39,4 +39,4 @@ The server was tested using:
 
 ## 4. Collaborators
 
-This project was implemented individually. No external code or generative AI tools were used.
+This project was implemented individually.
